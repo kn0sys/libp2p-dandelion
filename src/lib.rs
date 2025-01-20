@@ -18,8 +18,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// TODO: make struct fields private with accessors
-
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     error::Error,
@@ -66,7 +64,7 @@ pub struct PendingMessage {
 }
 
 /// Peer queue of peers for fluff propagation
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct MessageCache {
     /// Vector of PeerIds in their respective bytes representation
     peers: Vec<Vec<u8>>,
@@ -77,7 +75,7 @@ struct MessageCache {
 }
 
 /// Gossipsub message for transitioning to fluff phase
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct FluffTransitionMessage {
     source: Option<usize>,
     data: Vec<u8>,
@@ -161,21 +159,23 @@ impl DandelionNode {
 
     /// Report message validation for propagation
     pub fn validate_message(&mut self) {
-
-        // TODO: pull message cache from LMDB
-        let spread_peers: Vec<MessageCache> = Vec::new();
+        let key: Vec<u8> = Vec::from(VALIDATE_MSG.as_bytes());
+        let db: &DatabaseEnvironment = &DATABASE_LOCK;
+        let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
+       let result: Vec<MessageCache> =
+            bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
         // put message cache reconstruction here
-        for m in spread_peers {
+        for m in result {
             let msg_id = gossipsub::MessageId::new(&m.msg_id);
-            for p in m.peers {    
-                if let Err(e) = self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
-                    &msg_id,
-                    &PeerId::from_bytes(&p).unwrap(),
-                    libp2p::gossipsub::MessageAcceptance::Accept
-                ) {
-                    log::error!("Failed to propagate fluff message: {:?}", e);
+                for p in m.peers {
+                    if let Err(e) = self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                        &msg_id,
+    &PeerId::from_bytes(&p).unwrap_or(PeerId::from_bytes(&vec![1]).unwrap()),
+            libp2p::gossipsub::MessageAcceptance::Accept
+                    ) {
+                        log::error!("Failed to propagate fluff message: {:?}", e);
+                    }
                 }
-            }
         }
     }
 
@@ -325,38 +325,92 @@ impl DandelionNode {
     }
 
     /// Pull pending message cache from LMDB and transition to fluff if needed
-    pub fn transition_to_fluff(&mut self, id: &gossipsub::MessageId) {
-        // TODO: pull pending message cache from LMDB
+    pub fn transition_to_fluff(&mut self) {
+        let key: Vec<u8> = Vec::from(PENDING_FLUFF_MSG.as_bytes());
+        let db: &DatabaseEnvironment = &DATABASE_LOCK;
+        let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
+        let result: HashMap<Vec<u8>, PendingMessageCache> =
+            bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
         let mut rng = thread_rng();
         // Dynamic Stability through probabilistic transition
         if rng.gen::<f64>() <= self.dandelion.fluff_probability {
             // Get all peers from gossipsub
+            for (id, cache) in result {
+                let all_peers = self.swarm.behaviour().gossipsub.all_peers();
+                let mut available_peers: Vec<(&PeerId, Vec<&gossipsub::TopicHash>)> = all_peers
+                    .into_iter()
+                    .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.source).unwrap())
+                    .collect();
+                let a_len = available_peers.len();
+                // Calculate optimal spread factor based on network size
+                let spread_factor = (a_len as f64).sqrt().ceil() as usize;
+                let spread_factor = spread_factor.max(3).min(a_len);
+                // Shuffle peers for randomized selection
+                available_peers.shuffle(&mut rng);
+                // Select subset of peers for message propagation
+                let selected_peers = available_peers.iter().take(spread_factor);
+                // Prepare fluff phase message
+                let fluff_message = FluffTransitionMessage {
+                    source: None, // Anonymize source
+                    data: cache.content.clone(),
+                    sequence_number: rng.gen(), // Random sequence for unlinkability
+                };
+                let c_msg_id: gossipsub::MessageId = gossipsub::MessageId::new(&id);
+                let v_peers = selected_peers.map(|x| x.0.to_bytes()).collect::<Vec<Vec<u8>>>();
+                let cache = MessageCache {
+                    peers: v_peers,
+                    msg_id: c_msg_id.0,
+                    fluff_msg: fluff_message,
+                    is_fluff: true
+                };
+                let mut new_cache: Vec<MessageCache> = Vec::new();
+                new_cache.push(cache);
+                let b_cache = bincode::serialize(&new_cache).unwrap_or_default();
+                let b_key = Vec::from(VALIDATE_MSG.as_bytes());
+                let db: &DatabaseEnvironment = &DATABASE_LOCK;
+                write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
+                log::info!(
+                    "Transitioned message to fluff phase, propagated to {}/{} peers",
+                    spread_factor,
+                    available_peers.len()
+                    );
+            }
+        } else {
+            // If not transitioning to fluff, implement stem phase extension
+            self.extend_stem_phase();
+        }
+    }
+
+    /// Extend stem phase for state influence
+    pub fn extend_stem_phase(&mut self) {
+        let mut rng = thread_rng();
+        // Get available peers excluding message source
+        let key: Vec<u8> = Vec::from(PENDING_FLUFF_MSG.as_bytes());
+        let db: &DatabaseEnvironment = &DATABASE_LOCK;
+        let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
+        let result: HashMap<Vec<u8>, PendingMessageCache> =
+            bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
+        for (id, cache) in result {
             let all_peers = self.swarm.behaviour().gossipsub.all_peers();
-            let mut available_peers: Vec<(&PeerId, Vec<&gossipsub::TopicHash>)> = all_peers
+            let available_peers: Vec<_>= all_peers
                 .into_iter()
-                .filter(|peer| peer.0 != &message.source.unwrap())
+                .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.source).unwrap())
                 .collect();
-            let a_len = available_peers.len();
-            // Calculate optimal spread factor based on network size
-            let spread_factor = (a_len as f64).sqrt().ceil() as usize;
-            let spread_factor = spread_factor.max(3).min(a_len);
-            // Shuffle peers for randomized selection
-            available_peers.shuffle(&mut rng);
-            // Select subset of peers for message propagation
-            let selected_peers = available_peers.iter().take(spread_factor);
-            // Prepare fluff phase message
-            let fluff_message = FluffTransitionMessage {
-                source: None, // Anonymize source
-                data: message.content.clone(),
-                sequence_number: rng.gen(), // Random sequence for unlinkability
+                // Select single next hop for stem phase
+            let &next_peer = available_peers.choose(&mut rng).unwrap().0;
+                    // Prepare stem phase message
+            let stem_message = FluffTransitionMessage {
+                source: None,
+                data: cache.content,
+                sequence_number: rng.gen(),
             };
-            let c_msg_id: gossipsub::MessageId = gossipsub::MessageId::new(&id.0);
-            let v_peers = selected_peers.map(|x| x.0.to_bytes()).collect::<Vec<Vec<u8>>>();
+            let c_msg_id: gossipsub::MessageId = gossipsub::MessageId::new(&id);
+            let v_peers: Vec<Vec<u8>> = vec![next_peer.to_bytes()];
             let cache = MessageCache {
                 peers: v_peers,
                 msg_id: c_msg_id.0,
-                fluff_msg: fluff_message,
-                is_fluff: true
+                fluff_msg: stem_message,
+                is_fluff: false
             };
             let mut new_cache: Vec<MessageCache> = Vec::new();
             new_cache.push(cache);
@@ -364,49 +418,8 @@ impl DandelionNode {
             let b_key = Vec::from(VALIDATE_MSG.as_bytes());
             let db: &DatabaseEnvironment = &DATABASE_LOCK;
             write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
-            log::info!(
-                "Transitioned message to fluff phase, propagated to {}/{} peers",
-                spread_factor,
-                available_peers.len()
-                );
+            log::info!("Extended stem phase with new relay peer");
         }
-        // If not transitioning to fluff, implement stem phase extension
-        self.extend_stem_phase(id, message);
-    }
-
-    /// Extend stem phase for state influence
-    pub fn extend_stem_phase(&mut self, id: &gossipsub::MessageId) {
-        // TODO: pull pending message cache from LMDB
-        let mut rng = thread_rng();
-        // Get available peers excluding message source
-        let all_peers = self.swarm.behaviour().gossipsub.all_peers();
-        let available_peers: Vec<_>= all_peers
-            .into_iter()
-            .filter(|peer| peer.0 != &message.source.unwrap())
-            .collect();
-            // Select single next hop for stem phase
-        let &next_peer = available_peers.choose(&mut rng).unwrap().0;
-                // Prepare stem phase message
-        let stem_message = FluffTransitionMessage {
-            source: None,
-            data: message.content,
-            sequence_number: rng.gen(),
-        };
-        let c_msg_id: gossipsub::MessageId = gossipsub::MessageId::new(&id.0);
-        let v_peers: Vec<Vec<u8>> = vec![next_peer.to_bytes()];
-        let cache = MessageCache {
-            peers: v_peers,
-            msg_id: c_msg_id.0,
-            fluff_msg: stem_message,
-            is_fluff: false
-        };
-        let mut new_cache: Vec<MessageCache> = Vec::new();
-        new_cache.push(cache);
-        let b_cache = bincode::serialize(&new_cache).unwrap_or_default();
-        let b_key = Vec::from(VALIDATE_MSG.as_bytes());
-        let db: &DatabaseEnvironment = &DATABASE_LOCK;
-        write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
-        log::info!("Extended stem phase with new relay peer");
     }
 }
 

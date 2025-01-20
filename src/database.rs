@@ -9,31 +9,27 @@ use log::{error, info};
 use sysinfo::System;
 use std::sync::LazyLock;
 
-/// Keys indexer constant for writing all collections keys
-pub const VALENTINUS_KEYS: &str = "keys";
-/// Views indexer constant for writing all collections view names
-pub const VALENTINUS_VIEWS: &str = "views";
-/// Key lookup
-pub const VALENTINUS_KEY: &str = "key";
-/// View lookup
-pub const VALENTINUS_VIEW: &str = "view";
+/// Key for vector of messages to validate and propagate 
+pub const VALIDATE_MSG: &str = "v";
+/// Key for vector of messages to send for possible fluff propogation
+pub const PENDING_FLUFF_MSG: &str = "f";
 /// Ratio of map size to available memory is 20 percent
 const MAP_SIZE_MEMORY_RATIO: f32 = 0.2;
 /// Ratio of chunk size to available memory is 0.2 percent
 const CHUNK_SIZE_MEMORY_RATIO: f32 = MAP_SIZE_MEMORY_RATIO * 0.01;
 /// LDMB Environment variable
-pub const VALENTINUS_LMDB_ENV: &str = "VALENTINUS_LMDB_ENV";
+pub const DANDELION_LMDB_ENV: &str = "DANDELION_LMDB_ENV";
 
 /// Database lock is initialized on startup in order to cache the db handle
 pub static DATABASE_LOCK: LazyLock<DatabaseEnvironment> = LazyLock::new(|| {
-    let env = std::env::var(VALENTINUS_LMDB_ENV).unwrap_or(String::from("test"));
+    let env = std::env::var(DANDELION_LMDB_ENV).unwrap_or(String::from("test"));
     DatabaseEnvironment::open(&env).unwrap()
 });
 
 
 /// The database environment for handling primary database operations.
 ///
-/// By default the database will be written to /home/user/.valentinus/{ENV}/lmdb
+/// By default the database will be written to /home/user/.dandelion/{ENV}/lmdb
 pub struct DatabaseEnvironment {
     pub env: Environment,
     pub handle: DbHandle,
@@ -60,7 +56,7 @@ impl DatabaseEnvironment {
         };
         info!("$LMDB_USER={}", user);
         info!("excecuting lmdb open");
-        let file_path: String = format!("/home/{}/.{}/", user, "valentinus");
+        let file_path: String = format!("/home/{}/.{}/", user, "dandelion");
         let env: Environment = EnvBuilder::new()
             .map_size(env_map_size)
             .open(format!("{}/{}", file_path, env), 0o777)
