@@ -86,23 +86,6 @@ async fn run_network() -> Result<(), Box<dyn Error>> {
             }
             // broadcast event handling
             broadcast_event = node.swarm.select_next_some() => match broadcast_event {
-
-                // TODO: remove automatic peer discovery
-
-                // SwarmEvent::Behaviour(DandelionBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
-                //     for (peer_id, _multiaddr) in list {
-                //         println!("mDNS discovered a new peer: {peer_id}");
-                //         // swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                //         node.connect(_multiaddr).await?;
-                //     }
-                // },
-                // SwarmEvent::Behaviour(DandelionBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-                //     for (peer_id, _multiaddr) in list {
-                //         println!("mDNS discover peer has expired: {peer_id}");
-                //         //swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                //         node.disconnect(peer_id).await?;
-                //     }
-                // },
                 SwarmEvent::NewListenAddr { address, .. } => {
                     log::info!("Local node is listening on {address}/p2p/{}", node.swarm.local_peer_id());
                 },
@@ -120,20 +103,19 @@ async fn run_network() -> Result<(), Box<dyn Error>> {
                     message_id: id,
                     message,
                     }) => {
-                        println!(
+                        log::info!(
                             "Got message: '{}' with id: {id} from peer: {peer_id}",
                             String::from_utf8_lossy(&message.data),
                         );
-                        let msg_id = gossipsub::MessageId(message.data.clone());
                         // Process only if message not seen before
-                        if !node.dandelion.pending_messages.contains_key(&msg_id) {
+                        if !node.dandelion.pending_messages.contains_key(&id.clone()) {
                             let pending_msg = PendingMessage {
                                 content: message.data.clone(),
                                 received_at: tokio::time::Instant::now(),
                                 source: Some(peer_id),
                                 relayed: false,
                             };
-                            node.dandelion.pending_messages.insert(msg_id.clone(), pending_msg);
+                            node.dandelion.pending_messages.insert(id.clone(), pending_msg);
                         }
                     },
                     _=> {}

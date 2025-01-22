@@ -18,6 +18,10 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+
+// TODO: create stem subscriptions per peer
+
+
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     error::Error,
@@ -108,6 +112,7 @@ impl DandelionNode {
         fluff_probability: f64,
         stem_timeout: Duration,
     ) -> Result<Self, Box<dyn Error>> {
+        log::info!("creating new dandelion node with probability: {:?}", fluff_probability);
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
@@ -136,7 +141,6 @@ impl DandelionNode {
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub_config,
                 )?;
-
             let m_behaviour =
                 mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
             Ok( DandelionBehaviour { gossipsub: g_behaviour, mdns: m_behaviour })
@@ -145,7 +149,6 @@ impl DandelionNode {
         .build();
         // Framework-derived listener configuration
         swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-        log::debug!("swarm new listners: {}", swarm.listeners().count());
         let dandelion = Dandelion {
             fluff_probability,
             stem_timeout,
@@ -159,28 +162,35 @@ impl DandelionNode {
 
     /// Report message validation for propagation
     pub fn validate_message(&mut self) {
-        let key: Vec<u8> = Vec::from(VALIDATE_MSG.as_bytes());
+        let msg_key: Vec<u8> = Vec::from(VALIDATE_MSG.as_bytes());
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
-        let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
-       let result: Vec<MessageCache> =
+        let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &msg_key).unwrap_or_default();
+        let result: Vec<MessageCache> =
             bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
-        // put message cache reconstruction here
+        log::info!("validating {} messages for propagation", result.len());
+        log::debug!("processing cache: {:?}", result);
         for m in result {
-            let msg_id = gossipsub::MessageId::new(&m.msg_id);
-                for p in m.peers {
-                    if let Err(e) = self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
-                        &msg_id,
-    &PeerId::from_bytes(&p).unwrap_or(PeerId::from_bytes(&vec![1]).unwrap()),
-            libp2p::gossipsub::MessageAcceptance::Accept
-                    ) {
-                        log::error!("Failed to propagate fluff message: {:?}", e);
+            for p in m.peers {
+                let msg_id = gossipsub::MessageId::new(&m.msg_id);
+                if let Err(e) = self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                    &msg_id,
+                    &PeerId::from_bytes(&p).unwrap(),
+                    libp2p::gossipsub::MessageAcceptance::Accept) {
+                        log::error!("Failed to validate message: {:?}", e);
+                } else {
+                    if m.is_fluff {
+                        // publish to all peers
+                    } else {
+                        // publislh to stem peer subscription
                     }
                 }
+            }
         }
     }
 
     /// Boundary Dynamics
     pub async fn handle_peer_disconnect(&mut self, peer_id: PeerId) -> Result<(), Box<dyn Error>> {
+        log::info!("handle_peer_disconnect for {:?}", &peer_id);
         // Clean up any pending messages related to this peer
         self.dandelion.pending_messages.retain(|_, msg| {
             msg.source.map_or(true, |source| source != peer_id)
@@ -306,6 +316,7 @@ impl DandelionNode {
         let now = tokio::time::Instant::now();
         let mut completed_messages = HashMap::new();
         for (id, message) in self.dandelion.pending_messages.iter() {
+            log::debug!("process_pending_messages: {:?}", id);
             if now.duration_since(message.received_at) >= self.dandelion.stem_timeout {
                 let nanos = message.received_at.elapsed().as_nanos() as u64;
                 let received_at = nanos.to_be_bytes().to_vec();
@@ -315,9 +326,10 @@ impl DandelionNode {
                     source: message.source.unwrap().to_bytes(),
                     relayed: message.relayed
                 };
-                completed_messages.insert(gossipsub::MessageId::new(&id.0).0, p_cache);
+                completed_messages.insert(id.clone().0, p_cache);
             }
         } 
+        log::info!("processing {} pending messages", &completed_messages.len());
         let b_cache = bincode::serialize(&completed_messages).unwrap_or_default();
         let b_key = Vec::from(PENDING_FLUFF_MSG.as_bytes());
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
@@ -334,6 +346,9 @@ impl DandelionNode {
         let mut rng = thread_rng();
         // Dynamic Stability through probabilistic transition
         if rng.gen::<f64>() <= self.dandelion.fluff_probability {
+            log::info!("attempting fluff transition");
+            // Initialize Message cache
+            let mut new_cache: Vec<MessageCache> = Vec::new();
             // Get all peers from gossipsub
             for (id, cache) in result {
                 let all_peers = self.swarm.behaviour().gossipsub.all_peers();
@@ -341,6 +356,7 @@ impl DandelionNode {
                     .into_iter()
                     .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.source).unwrap())
                     .collect();
+                log::debug!("available peers: {:?}", &available_peers);
                 let a_len = available_peers.len();
                 // Calculate optimal spread factor based on network size
                 let spread_factor = (a_len as f64).sqrt().ceil() as usize;
@@ -355,7 +371,8 @@ impl DandelionNode {
                     data: cache.content.clone(),
                     sequence_number: rng.gen(), // Random sequence for unlinkability
                 };
-                let c_msg_id: gossipsub::MessageId = gossipsub::MessageId::new(&id);
+                let c_msg_id: gossipsub::MessageId = gossipsub::MessageId(id);
+                log::debug!("transition_to_fluff {:?}", c_msg_id);
                 let v_peers = selected_peers.map(|x| x.0.to_bytes()).collect::<Vec<Vec<u8>>>();
                 let cache = MessageCache {
                     peers: v_peers,
@@ -363,20 +380,16 @@ impl DandelionNode {
                     fluff_msg: fluff_message,
                     is_fluff: true
                 };
-                let mut new_cache: Vec<MessageCache> = Vec::new();
                 new_cache.push(cache);
+            }
                 let b_cache = bincode::serialize(&new_cache).unwrap_or_default();
                 let b_key = Vec::from(VALIDATE_MSG.as_bytes());
                 let db: &DatabaseEnvironment = &DATABASE_LOCK;
                 write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
-                log::info!(
-                    "Transitioned message to fluff phase, propagated to {}/{} peers",
-                    spread_factor,
-                    available_peers.len()
-                    );
-            }
+                log::info!("Transitioned message to fluff phase");
         } else {
             // If not transitioning to fluff, implement stem phase extension
+            log::info!("activate stem phase extension");
             self.extend_stem_phase();
         }
     }
@@ -390,21 +403,26 @@ impl DandelionNode {
         let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
         let result: HashMap<Vec<u8>, PendingMessageCache> =
             bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
+        // initialize message cache
+        let mut new_cache: Vec<MessageCache> = Vec::new();
         for (id, cache) in result {
             let all_peers = self.swarm.behaviour().gossipsub.all_peers();
             let available_peers: Vec<_>= all_peers
                 .into_iter()
                 .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.source).unwrap())
                 .collect();
-                // Select single next hop for stem phase
-            let &next_peer = available_peers.choose(&mut rng).unwrap().0;
-                    // Prepare stem phase message
+            log::debug!("log debug: {:?}", &available_peers);
+            // Select single next hop for stem phase
+            let u_next_peer = available_peers.choose(&mut rng);
+            let next_peer = if u_next_peer.is_some() { u_next_peer.unwrap().0 } else { available_peers[0].0 };
+            log::info!("selected {:?} for stem phase", &next_peer);
+            // Prepare stem phase message
             let stem_message = FluffTransitionMessage {
                 source: None,
-                data: cache.content,
+                data: cache.content.clone(),
                 sequence_number: rng.gen(),
             };
-            let c_msg_id: gossipsub::MessageId = gossipsub::MessageId::new(&id);
+            let c_msg_id: gossipsub::MessageId = gossipsub::MessageId(id);
             let v_peers: Vec<Vec<u8>> = vec![next_peer.to_bytes()];
             let cache = MessageCache {
                 peers: v_peers,
@@ -412,14 +430,13 @@ impl DandelionNode {
                 fluff_msg: stem_message,
                 is_fluff: false
             };
-            let mut new_cache: Vec<MessageCache> = Vec::new();
             new_cache.push(cache);
+        }
             let b_cache = bincode::serialize(&new_cache).unwrap_or_default();
             let b_key = Vec::from(VALIDATE_MSG.as_bytes());
             let db: &DatabaseEnvironment = &DATABASE_LOCK;
             write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
             log::info!("Extended stem phase with new relay peer");
-        }
     }
 }
 

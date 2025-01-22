@@ -13,6 +13,8 @@ use std::sync::LazyLock;
 pub const VALIDATE_MSG: &str = "v";
 /// Key for vector of messages to send for possible fluff propogation
 pub const PENDING_FLUFF_MSG: &str = "f";
+/// Key for set the local peer id
+pub const LOCAL_PEER_ID: &str = "l";
 /// Ratio of map size to available memory is 20 percent
 const MAP_SIZE_MEMORY_RATIO: f32 = 0.2;
 /// Ratio of chunk size to available memory is 0.2 percent
