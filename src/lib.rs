@@ -18,10 +18,6 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-
-// TODO: create stem subscriptions per peer
-
-
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     error::Error,
@@ -105,6 +101,7 @@ pub struct DandelionBehaviour {
 pub struct DandelionNode {
     pub swarm: Swarm<DandelionBehaviour>,
     pub dandelion: Dandelion,
+    peers: Vec<PeerId>
 }
 
 impl DandelionNode {
@@ -154,9 +151,11 @@ impl DandelionNode {
             stem_timeout,
             pending_messages: HashMap::new()
         };
+        let peers = Vec::new();
         Ok(Self {
             swarm,
             dandelion,
+            peers,
         })
     }
 
@@ -178,11 +177,8 @@ impl DandelionNode {
                     libp2p::gossipsub::MessageAcceptance::Accept) {
                         log::error!("Failed to validate message: {:?}", e);
                 } else {
-                    if m.is_fluff {
-                        // publish to all peers
-                    } else {
-                        // publislh to stem peer subscription
-                    }
+                    let topic = gossipsub::IdentTopic::new(&format!("stem-{}", PeerId::from_bytes(&p).unwrap()));
+                    self.broadcast_message(m.fluff_msg.data.clone(), topic).unwrap();
                 }
             }
         }
@@ -202,6 +198,29 @@ impl DandelionNode {
     pub fn listen_addresses(&self) -> impl Iterator<Item = &Multiaddr> {
         // Get all active listening addresses from the swarm
         self.swarm.listeners()
+    }
+    
+    pub fn set_all_peers(&mut self) {
+        let all_peers = self.swarm.behaviour_mut().gossipsub.all_peers().collect::<Vec<_>>();
+        self.peers = all_peers.into_iter()
+            .map(|x| PeerId::from_bytes(&x.0.to_bytes()).unwrap()).collect::<Vec<_>>();
+    }
+    
+    /// Get all topics
+    pub fn random_topic(&mut self) -> gossipsub::IdentTopic {
+        log::info!("selecting random topic");
+        // choose a random topic hash get all peer and match it
+        let topics = self.swarm.behaviour_mut().gossipsub.topics().collect::<Vec<_>>();
+        let r_topic = *topics.choose(&mut rand::thread_rng()).unwrap();
+        let peers = &self.peers; 
+        for p in peers {
+            let topic = gossipsub::IdentTopic::new(&format!("stem-{}", p));
+            if *r_topic == topic.hash() {
+                log::debug!("found topic hash match for random topic");
+                return topic;
+            }
+        }
+        gossipsub::IdentTopic::new("dandelion")
     }
 
     // Derived
@@ -239,9 +258,12 @@ impl DandelionNode {
             return Ok(());
         }
         // Attempt connection
+        let topic = gossipsub::IdentTopic::new(format!("stem-{}", &peer_id));
         match self.swarm.dial(addr.clone()) {
             Ok(_) => {
                 log::info!("Dialing peer {:?} at {}", peer_id, addr);
+                // create peer subscription for stem and fluff
+                self.subscribe(&topic).unwrap();
                 // Wait for connection establishment
                 self.wait_for_connection(peer_id).await?;
                 Ok(())
@@ -304,10 +326,9 @@ impl DandelionNode {
         /// Self-modeling frame for state transition influence
     pub fn broadcast_message(&mut self, data: Vec<u8>, topic: gossipsub::IdentTopic) -> Result<(), Box<dyn Error>> {
         // TODO: write broadcasted messages to db
-        //let message_id = gossipsub::MessageId(data.clone());
-            if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
-                log::error!("Failed to publish message: {:?}", e);
-            }
+        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
+            log::error!("Failed to publish message: {:?}", e);
+        }
         Ok(())
     }
 

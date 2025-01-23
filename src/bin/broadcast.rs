@@ -50,8 +50,8 @@ async fn run_network() -> Result<(), Box<dyn Error>> {
         Duration::from_secs(30), // stem timeout
     ).await?;
 
-    // Create a Gossipsub topic and subscribe
-    let broadcast_topic = gossipsub::IdentTopic::new("dandelion");
+    // Create a Gossipsub topic and subscribe to our own topic
+    let broadcast_topic = gossipsub::IdentTopic::new(format!("stem-{}", node.swarm.local_peer_id()));
     node.subscribe(&broadcast_topic).unwrap();
 
     // Read from standard input for chat
@@ -66,6 +66,8 @@ async fn run_network() -> Result<(), Box<dyn Error>> {
         node.transition_to_fluff();
         // 3. Validate and propagate
         node.validate_message();
+        // 4. Re-initialize peers
+        node.set_all_peers();
 
         // broadcast
         select! {
@@ -78,11 +80,12 @@ async fn run_network() -> Result<(), Box<dyn Error>> {
                 } else if line.starts_with("send ") {
                     let msg = &line.split("send ").collect::<Vec<&str>>().join("");
                     log::info!("sending message: {}", msg);
-                     if let Err(e) = node.broadcast_message(msg.as_bytes().to_vec(), broadcast_topic.clone()) {
+                    // TODO: randomize peer on initial broadcast
+                    let topic = node.random_topic();
+                    if let Err(e) = node.broadcast_message(msg.as_bytes().to_vec(), topic) {
                         log::error!("Publish error: {e:?}");
                     }
                 }
-               
             }
             // broadcast event handling
             broadcast_event = node.swarm.select_next_some() => match broadcast_event {
