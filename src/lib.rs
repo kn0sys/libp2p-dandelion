@@ -18,6 +18,12 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+//! libp2p_dandelion is a modified Dandelion implementation for enhanced privacy
+//! of p2p message broadcasting.
+//!
+//! ## Example
+//!
+//! see https://github.com/kn0sys/libp2p-dandelion/blob/main/src/bin/broadcast.rs
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     error::Error,
@@ -41,25 +47,29 @@ use serde::{Deserialize, Serialize};
 mod database;
 use crate::database::*;
 
-// Derived from Derivation
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct MessageId(Vec<u8>);
-
 /// Pending Message Cache serializtion for passing messages to fluff propagation
 #[derive(Deserialize, Serialize)]
 struct PendingMessageCache {
+    /// bytes representation of the message to broadcast 
     content: Vec<u8>,
+    /// unix timestamp of message reception in bytes
     received_at: Vec<u8>,
+    /// bytes of the `PeerId` of the message
     source: Vec<u8>,
+    /// status of relay
     relayed: bool,
 }
 
 /// Necessary ordering for state distinctions
 #[derive(Clone)]
 pub struct PendingMessage {
+    /// bytes representation of the message to broadcast
     pub content: Vec<u8>,
+    /// time of receipt
     pub received_at: tokio::time::Instant,
+    /// source of message
     pub source: Option<PeerId>,
+    /// status of relay
     pub relayed: bool,
 }
 
@@ -70,41 +80,56 @@ struct MessageCache {
     peers: Vec<Vec<u8>>,
     /// Message Id as bytes
     msg_id: Vec<u8>,
+    /// see `struct FluffTransitionMessage`
     fluff_msg: FluffTransitionMessage,
+    /// flag for messages selected for fluff transition
     is_fluff: bool,
 }
 
 /// Gossipsub message for transitioning to fluff phase
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct FluffTransitionMessage {
+    /// masked source of the message
     source: Option<usize>,
+    /// message content in bytes
     data: Vec<u8>,
+    /// randomized sequence number for the message
     sequence_number: f64,
 }
 
 /// Necessary structural relationship for depth, persistence and directions
 #[derive(Clone)]
 pub struct Dandelion {
+    /// probabilistic parameter for fluff activation
     fluff_probability: f64,
+    /// TODO: randomized stem timeout values
+    /// amount of time to delay before allowing stem activation
     stem_timeout: Duration,
+    /// data structure containing messages to propagate
     pub pending_messages: HashMap<gossipsub::MessageId, PendingMessage>,
 }
 
-/// Dandelion behavior for complete Self-Reference
+/// Dandelion behavior uses gossipsub.
 #[derive(NetworkBehaviour)]
 pub struct DandelionBehaviour {
+    /// libp2p gossipsub
     gossipsub: gossipsub::Behaviour,
+    /// see libp2p mdns, TODO: remove this if not needed
     mdns: mdns::tokio::Behaviour,
 }
 
 /// Main node implementation
 pub struct DandelionNode {
+    /// see libp2p swarm
     pub swarm: Swarm<DandelionBehaviour>,
+    /// see `struct Dandelion`
     pub dandelion: Dandelion,
+    /// list of currently connected peers
     peers: Vec<PeerId>
 }
 
 impl DandelionNode {
+    /// Create a new Dandelion instance.
     pub async fn new(
         fluff_probability: f64,
         stem_timeout: Duration,
@@ -158,7 +183,6 @@ impl DandelionNode {
             peers,
         })
     }
-
     /// Report message validation for propagation
     pub fn validate_message(&mut self) {
         let msg_key: Vec<u8> = Vec::from(VALIDATE_MSG.as_bytes());
@@ -183,8 +207,7 @@ impl DandelionNode {
             }
         }
     }
-
-    /// Boundary Dynamics
+    /// Clean up for messages related to a disconnected peer
     pub async fn handle_peer_disconnect(&mut self, peer_id: PeerId) -> Result<(), Box<dyn Error>> {
         log::info!("handle_peer_disconnect for {:?}", &peer_id);
         // Clean up any pending messages related to this peer
@@ -193,20 +216,18 @@ impl DandelionNode {
         });
         Ok(())
     }
-
-    //
+    /// Same as swarm.listeners()
     pub fn listen_addresses(&self) -> impl Iterator<Item = &Multiaddr> {
         // Get all active listening addresses from the swarm
         self.swarm.listeners()
     }
-    
+    /// Helper method for fetching all peers
     pub fn set_all_peers(&mut self) {
         let all_peers = self.swarm.behaviour_mut().gossipsub.all_peers().collect::<Vec<_>>();
         self.peers = all_peers.into_iter()
             .map(|x| PeerId::from_bytes(&x.0.to_bytes()).unwrap()).collect::<Vec<_>>();
     }
-    
-    /// Get all topics
+    /// Helper method for selecting a random peer based on peer subscription
     pub fn random_topic(&mut self) -> gossipsub::IdentTopic {
         log::info!("selecting random topic");
         // choose a random topic hash get all peer and match it
@@ -222,8 +243,7 @@ impl DandelionNode {
         }
         gossipsub::IdentTopic::new("dandelion")
     }
-
-    // Derived
+    /// see swarm.behaviour_mut().gossipsub.subscribe(topic);
     pub fn subscribe(&mut self, topic: &gossipsub::IdentTopic) -> Result<bool, Box<dyn Error>> {
         // Subscribe to topic in gossipsub
         match self.swarm.behaviour_mut().gossipsub.subscribe(topic) {
@@ -241,8 +261,7 @@ impl DandelionNode {
             }
         }
     }
-
-     // Derived from Derivation
+    /// Calls swarm.dial() and subscribes to `stem-{PEER_ID}` on successful connection
     pub async fn connect(&mut self, addr: Multiaddr) -> Result<(), Box<dyn Error>> {
         // Extract peer ID from address
         let peer_id = match addr.iter().find_map(|p| match p {
@@ -274,12 +293,10 @@ impl DandelionNode {
             }
         }
     }
-
-    // Helper to wait for connection
+    /// Helper for processing events on peer connection
     async fn wait_for_connection(&mut self, peer_id: PeerId) -> Result<(), Box<dyn Error>> {
         let timeout = Duration::from_secs(30);
         let start = tokio::time::Instant::now();
-
         while !self.is_connected(&peer_id) {
             if start.elapsed() > timeout {
                 return Err("Connection timeout".into());
@@ -299,31 +316,25 @@ impl DandelionNode {
                 _ => continue,
             }
         }
-
         Ok(())
     }
-
-    // Check connection status
+    /// see swarm.is_connected()
     pub fn is_connected(&self, peer_id: &PeerId) -> bool {
         self.swarm.is_connected(peer_id)
     }
-
-    // Get all connected peers
+    /// see swarm.connected_peers()
     pub fn connected_peers(&self) -> impl Iterator<Item = &PeerId> {
         self.swarm.connected_peers()
     }
-
-    // Disconnect from peer
+    /// see swarm.disconnected()
     pub async fn disconnect(&mut self, peer_id: PeerId) -> Result<(), Box<dyn Error>> {
         if self.is_connected(&peer_id) {
-            // Disconnect peer
             self.swarm.disconnect_peer_id(peer_id).unwrap();
             log::info!("Disconnected from peer: {:?}", peer_id);
         }
         Ok(())
     }
-
-        /// Self-modeling frame for state transition influence
+    /// Self-modeling frame for state transition influence
     pub fn broadcast_message(&mut self, data: Vec<u8>, topic: gossipsub::IdentTopic) -> Result<(), Box<dyn Error>> {
         // TODO: write broadcasted messages to db
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
@@ -331,7 +342,6 @@ impl DandelionNode {
         }
         Ok(())
     }
-
     /// Write messages pending fluff propagation or stem extension to LMDB for processing
     pub fn process_pending_messages(&mut self) {
         let now = tokio::time::Instant::now();
@@ -356,7 +366,6 @@ impl DandelionNode {
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
         write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
     }
-
     /// Pull pending message cache from LMDB and transition to fluff if needed
     pub fn transition_to_fluff(&mut self) {
         let key: Vec<u8> = Vec::from(PENDING_FLUFF_MSG.as_bytes());
@@ -414,7 +423,6 @@ impl DandelionNode {
             self.extend_stem_phase();
         }
     }
-
     /// Extend stem phase for state influence
     pub fn extend_stem_phase(&mut self) {
         let mut rng = thread_rng();

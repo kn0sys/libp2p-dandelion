@@ -13,8 +13,6 @@ use std::sync::LazyLock;
 pub const VALIDATE_MSG: &str = "v";
 /// Key for vector of messages to send for possible fluff propogation
 pub const PENDING_FLUFF_MSG: &str = "f";
-/// Key for set the local peer id
-pub const LOCAL_PEER_ID: &str = "l";
 /// Ratio of map size to available memory is 20 percent
 const MAP_SIZE_MEMORY_RATIO: f32 = 0.2;
 /// Ratio of chunk size to available memory is 0.2 percent
@@ -129,7 +127,7 @@ impl DatabaseEnvironment {
         Ok(result)
     }
     /// Deletes a key/value pair from the database
-    pub fn delete(e: &Environment, h: &DbHandle, k: &[u8]) -> Result<(), MdbError> {
+    pub fn _delete(e: &Environment, h: &DbHandle, k: &[u8]) -> Result<(), MdbError> {
         info!("excecuting lmdb delete");
         if k.is_empty() {
             error!("can't delete empty key");
@@ -197,7 +195,6 @@ pub fn write_chunks(e: &Environment, h: &DbHandle, k: &[u8], v: &[u8]) -> Result
 mod tests {
 
     use super::*;
-
     use rand::RngCore;
 
     #[test]
@@ -211,7 +208,7 @@ mod tests {
         write_chunks(&db.env, &db.handle, &Vec::from(k), &Vec::from(data))?;
         let actual = DatabaseEnvironment::read(&db.env, &db.handle, &Vec::from(k));
         assert_eq!(expected.to_vec(), actual?);
-        let _ = DatabaseEnvironment::delete(&db.env, &db.handle, &Vec::from(k));
+        let _ = DatabaseEnvironment::_delete(&db.env, &db.handle, &Vec::from(k));
         Ok(())
     }
 }
