@@ -42,7 +42,7 @@ use libp2p::{
     tcp, yamux,
 };
 use tokio::io;
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{seq::*, rng, Rng};
 use serde::{Deserialize, Serialize};
 mod database;
 use crate::database::*;
@@ -232,7 +232,7 @@ impl DandelionNode {
         log::info!("selecting random topic");
         // choose a random topic hash get all peer and match it
         let topics = self.swarm.behaviour_mut().gossipsub.topics().collect::<Vec<_>>();
-        let r_topic = *topics.choose(&mut rand::thread_rng()).unwrap();
+        let r_topic = *topics.choose(&mut rand::rng()).unwrap();
         let peers = &self.peers; 
         for p in peers {
             let topic = gossipsub::IdentTopic::new(&format!("stem-{}", p));
@@ -373,9 +373,9 @@ impl DandelionNode {
         let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
         let result: HashMap<Vec<u8>, PendingMessageCache> =
             bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
-        let mut rng = thread_rng();
+        let mut rng = rng();
         // Dynamic Stability through probabilistic transition
-        if rng.gen::<f64>() <= self.dandelion.fluff_probability {
+        if rng.random::<f64>() <= self.dandelion.fluff_probability {
             log::info!("attempting fluff transition");
             // Initialize Message cache
             let mut new_cache: Vec<MessageCache> = Vec::new();
@@ -399,7 +399,7 @@ impl DandelionNode {
                 let fluff_message = FluffTransitionMessage {
                     source: None, // Anonymize source
                     data: cache.content.clone(),
-                    sequence_number: rng.gen(), // Random sequence for unlinkability
+                    sequence_number: rng.random(), // Random sequence for unlinkability
                 };
                 let c_msg_id: gossipsub::MessageId = gossipsub::MessageId(id);
                 log::debug!("transition_to_fluff {:?}", c_msg_id);
@@ -425,7 +425,7 @@ impl DandelionNode {
     }
     /// Extend stem phase for state influence
     pub fn extend_stem_phase(&mut self) {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         // Get available peers excluding message source
         let key: Vec<u8> = Vec::from(PENDING_FLUFF_MSG.as_bytes());
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
@@ -449,7 +449,7 @@ impl DandelionNode {
             let stem_message = FluffTransitionMessage {
                 source: None,
                 data: cache.content.clone(),
-                sequence_number: rng.gen(),
+                sequence_number: rng.random(),
             };
             let c_msg_id: gossipsub::MessageId = gossipsub::MessageId(id);
             let v_peers: Vec<Vec<u8>> = vec![next_peer.to_bytes()];
