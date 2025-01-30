@@ -195,11 +195,11 @@ impl DandelionNode {
         for m in result {
             for p in m.peers {
                 let msg_id = gossipsub::MessageId::new(&m.msg_id);
-                if let Err(e) = self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                if !self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
                     &msg_id,
                     &PeerId::from_bytes(&p).unwrap(),
                     libp2p::gossipsub::MessageAcceptance::Accept) {
-                        log::error!("Failed to validate message: {:?}", e);
+                        log::error!("Failed to validate message");
                 } else {
                     let topic = gossipsub::IdentTopic::new(&format!("stem-{}", PeerId::from_bytes(&p).unwrap()));
                     self.broadcast_message(m.fluff_msg.data.clone(), topic).unwrap();
