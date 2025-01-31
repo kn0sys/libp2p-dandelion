@@ -1,6 +1,6 @@
 [package]
 name = "libp2p_dandelion"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Nigel Christian <nigel.christian@hiahatf.org>"]
 documentation = "https://docs.rs/libp2p-dandelion"
