@@ -39,8 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         run_network().await.unwrap();
     });
 
-    // run the network forever
-    loop {}
+    panic!("network error");
     Ok(())
 }
 

@@ -46,9 +46,10 @@ use rand::{seq::*, rng, Rng};
 use serde::{Deserialize, Serialize};
 mod database;
 use crate::database::*;
+use bincode::{Encode, Decode, config};
 
 /// Pending Message Cache serializtion for passing messages to fluff propagation
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 struct PendingMessageCache {
     /// bytes representation of the message to broadcast 
     content: Vec<u8>,
@@ -58,6 +59,14 @@ struct PendingMessageCache {
     source: Vec<u8>,
     /// status of relay
     relayed: bool,
+}
+
+/// Bincode V2 PendingMessageCache
+#[derive(Encode, Decode, Debug)]
+struct PrePendingMessageCache {
+    /// Bincode V1 PendingMessageCache
+    #[bincode(with_serde)]
+    pub serde: PendingMessageCache,
 }
 
 /// Necessary ordering for state distinctions
@@ -85,6 +94,15 @@ struct MessageCache {
     /// flag for messages selected for fluff transition
     is_fluff: bool,
 }
+
+/// Bincode V2 MessageCache
+#[derive(Encode, Decode, Debug)]
+pub struct PreMessageCache {
+    /// Bincode V1 MessageCache
+    #[bincode(with_serde)]
+    serde: MessageCache,
+}
+
 
 /// Gossipsub message for transitioning to fluff phase
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -188,21 +206,21 @@ impl DandelionNode {
         let msg_key: Vec<u8> = Vec::from(VALIDATE_MSG.as_bytes());
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
         let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &msg_key).unwrap_or_default();
-        let result: Vec<MessageCache> =
-            bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
+        let result: Vec<PreMessageCache> =
+            bincode::decode_from_slice(&p_msg_bytes[..], config::standard()).unwrap_or_default().0; 
         log::info!("validating {} messages for propagation", result.len());
         log::debug!("processing cache: {:?}", result);
         for m in result {
-            for p in m.peers {
-                let msg_id = gossipsub::MessageId::new(&m.msg_id);
+            for p in m.serde.peers {
+                let msg_id = gossipsub::MessageId::new(&m.serde.msg_id);
                 if !self.swarm.behaviour_mut().gossipsub.report_message_validation_result(
                     &msg_id,
                     &PeerId::from_bytes(&p).unwrap(),
                     libp2p::gossipsub::MessageAcceptance::Accept) {
                         log::error!("Failed to validate message");
                 } else {
-                    let topic = gossipsub::IdentTopic::new(&format!("stem-{}", PeerId::from_bytes(&p).unwrap()));
-                    self.broadcast_message(m.fluff_msg.data.clone(), topic).unwrap();
+                    let topic = gossipsub::IdentTopic::new(format!("stem-{}", PeerId::from_bytes(&p).unwrap()));
+                    self.broadcast_message(m.serde.fluff_msg.data.clone(), topic).unwrap();
                 }
             }
         }
@@ -212,7 +230,7 @@ impl DandelionNode {
         log::info!("handle_peer_disconnect for {:?}", &peer_id);
         // Clean up any pending messages related to this peer
         self.dandelion.pending_messages.retain(|_, msg| {
-            msg.source.map_or(true, |source| source != peer_id)
+            msg.source != Some(peer_id)
         });
         Ok(())
     }
@@ -235,7 +253,7 @@ impl DandelionNode {
         let r_topic = *topics.choose(&mut rand::rng()).unwrap();
         let peers = &self.peers; 
         for p in peers {
-            let topic = gossipsub::IdentTopic::new(&format!("stem-{}", p));
+            let topic = gossipsub::IdentTopic::new(format!("stem-{}", p));
             if *r_topic == topic.hash() {
                 log::debug!("found topic hash match for random topic");
                 return topic;
@@ -357,11 +375,12 @@ impl DandelionNode {
                     source: message.source.unwrap().to_bytes(),
                     relayed: message.relayed
                 };
-                completed_messages.insert(id.clone().0, p_cache);
+                let pre_p_cache = PrePendingMessageCache { serde: p_cache };
+                completed_messages.insert(id.clone().0, pre_p_cache);
             }
         } 
         log::info!("processing {} pending messages", &completed_messages.len());
-        let b_cache = bincode::serialize(&completed_messages).unwrap_or_default();
+        let b_cache = bincode::encode_to_vec(&completed_messages, config::standard()).unwrap_or_default();
         let b_key = Vec::from(PENDING_FLUFF_MSG.as_bytes());
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
         write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
@@ -371,20 +390,20 @@ impl DandelionNode {
         let key: Vec<u8> = Vec::from(PENDING_FLUFF_MSG.as_bytes());
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
         let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
-        let result: HashMap<Vec<u8>, PendingMessageCache> =
-            bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
+        let result: HashMap<Vec<u8>, PrePendingMessageCache> =
+            bincode::decode_from_slice(&p_msg_bytes[..], config::standard()).unwrap_or_default().0; 
         let mut rng = rng();
         // Dynamic Stability through probabilistic transition
         if rng.random::<f64>() <= self.dandelion.fluff_probability {
             log::info!("attempting fluff transition");
             // Initialize Message cache
-            let mut new_cache: Vec<MessageCache> = Vec::new();
+            let mut new_cache: Vec<PreMessageCache> = Vec::new();
             // Get all peers from gossipsub
             for (id, cache) in result {
                 let all_peers = self.swarm.behaviour().gossipsub.all_peers();
                 let mut available_peers: Vec<(&PeerId, Vec<&gossipsub::TopicHash>)> = all_peers
                     .into_iter()
-                    .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.source).unwrap())
+                    .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.serde.source).unwrap())
                     .collect();
                 log::debug!("available peers: {:?}", &available_peers);
                 let a_len = available_peers.len();
@@ -398,7 +417,7 @@ impl DandelionNode {
                 // Prepare fluff phase message
                 let fluff_message = FluffTransitionMessage {
                     source: None, // Anonymize source
-                    data: cache.content.clone(),
+                    data: cache.serde.content.clone(),
                     sequence_number: rng.random(), // Random sequence for unlinkability
                 };
                 let c_msg_id: gossipsub::MessageId = gossipsub::MessageId(id);
@@ -410,9 +429,10 @@ impl DandelionNode {
                     fluff_msg: fluff_message,
                     is_fluff: true
                 };
-                new_cache.push(cache);
+                let pre_cache = PreMessageCache { serde: cache };
+                new_cache.push(pre_cache);
             }
-                let b_cache = bincode::serialize(&new_cache).unwrap_or_default();
+                let b_cache = bincode::encode_to_vec(&new_cache, config::standard()).unwrap_or_default();
                 let b_key = Vec::from(VALIDATE_MSG.as_bytes());
                 let db: &DatabaseEnvironment = &DATABASE_LOCK;
                 write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
@@ -430,15 +450,15 @@ impl DandelionNode {
         let key: Vec<u8> = Vec::from(PENDING_FLUFF_MSG.as_bytes());
         let db: &DatabaseEnvironment = &DATABASE_LOCK;
         let p_msg_bytes = DatabaseEnvironment::read(&db.env, &db.handle, &key).unwrap_or_default();
-        let result: HashMap<Vec<u8>, PendingMessageCache> =
-            bincode::deserialize(&p_msg_bytes[..]).unwrap_or_default(); 
+        let result: HashMap<Vec<u8>, PrePendingMessageCache> =
+            bincode::decode_from_slice(&p_msg_bytes[..], config::standard()).unwrap_or_default().0; 
         // initialize message cache
-        let mut new_cache: Vec<MessageCache> = Vec::new();
+        let mut new_cache: Vec<PreMessageCache> = Vec::new();
         for (id, cache) in result {
             let all_peers = self.swarm.behaviour().gossipsub.all_peers();
             let available_peers: Vec<_>= all_peers
                 .into_iter()
-                .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.source).unwrap())
+                .filter(|peer| *peer.0 != PeerId::from_bytes(&cache.serde.source).unwrap())
                 .collect();
             log::debug!("log debug: {:?}", &available_peers);
             // Select single next hop for stem phase
@@ -448,7 +468,7 @@ impl DandelionNode {
             // Prepare stem phase message
             let stem_message = FluffTransitionMessage {
                 source: None,
-                data: cache.content.clone(),
+                data: cache.serde.content.clone(),
                 sequence_number: rng.random(),
             };
             let c_msg_id: gossipsub::MessageId = gossipsub::MessageId(id);
@@ -459,9 +479,10 @@ impl DandelionNode {
                 fluff_msg: stem_message,
                 is_fluff: false
             };
-            new_cache.push(cache);
+            let pre_cache = PreMessageCache { serde: cache };
+            new_cache.push(pre_cache);
         }
-            let b_cache = bincode::serialize(&new_cache).unwrap_or_default();
+            let b_cache = bincode::encode_to_vec(&new_cache, config::standard()).unwrap_or_default();
             let b_key = Vec::from(VALIDATE_MSG.as_bytes());
             let db: &DatabaseEnvironment = &DATABASE_LOCK;
             write_chunks(&db.env, &db.handle, &b_key, &b_cache).unwrap();
